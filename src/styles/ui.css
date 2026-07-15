@@ -1,0 +1,230 @@
+:root {
+  --grin-yellow: #ffd400;
+  --grin-yellow-dark: #e6be00;
+  --grin-black: #0a0a0a;
+  --grin-white: #ffffff;
+  --grin-gray: #1a1a1a;
+  --grin-muted: rgba(255, 255, 255, 0.72);
+  --grin-rival: #ff5a5a;
+
+  --font-display: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'Space Grotesk', system-ui, sans-serif;
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+
+  --shadow-soft: 0 8px 32px rgba(0, 0, 0, 0.35);
+  --shadow-glow: 0 0 0 2px var(--grin-yellow), 0 12px 40px rgba(255, 212, 0, 0.25);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--grin-black);
+  font-family: var(--font-body);
+  color: var(--grin-white);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app,
+.wg-root {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  background: var(--grin-black);
+}
+
+.wg-canvas-wrap {
+  position: absolute;
+  inset: 0;
+}
+
+.wg-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.wg-hud-weapons {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: none;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: min(96vw, 720px);
+  gap: 6px;
+  z-index: 4;
+  pointer-events: auto;
+}
+
+.wg-playing .wg-hud-weapons {
+  display: flex;
+}
+
+.wg-weapon {
+  border: 2px solid transparent;
+  background: rgba(10, 10, 10, 0.75);
+  color: var(--grin-white);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.8rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+
+.wg-weapon-active {
+  border-color: var(--grin-yellow);
+  color: var(--grin-black);
+  background: var(--grin-yellow);
+}
+
+.wg-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.wg-overlay > * {
+  pointer-events: auto;
+}
+
+.wg-panel {
+  max-width: min(92vw, 440px);
+  width: 100%;
+  padding: 2rem 1.75rem;
+  background: rgba(10, 10, 10, 0.92);
+  border: 2px solid var(--grin-yellow);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-glow);
+  text-align: center;
+  backdrop-filter: blur(8px);
+}
+
+.wg-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.45rem 1rem;
+  margin-bottom: 1rem;
+  background: var(--grin-yellow);
+  color: var(--grin-black);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: 0.04em;
+  clip-path: polygon(8% 0, 92% 0, 100% 50%, 92% 100%, 8% 100%, 0 50%);
+}
+
+.wg-title {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-display);
+  font-size: clamp(1.75rem, 6vw, 2.5rem);
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--grin-white);
+}
+
+.wg-subtitle {
+  margin: 0 0 1.5rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--grin-muted);
+}
+
+.wg-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+}
+
+.wg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 140px;
+  padding: 0.85rem 1.5rem;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--grin-yellow);
+  color: var(--grin-black);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  box-shadow: var(--shadow-soft);
+}
+
+.wg-btn-alt {
+  background: transparent;
+  color: var(--grin-yellow);
+  border: 2px solid var(--grin-yellow);
+  box-shadow: none;
+}
+
+.wg-btn:hover {
+  transform: translateY(-2px);
+  background: var(--grin-yellow-dark);
+  box-shadow: var(--shadow-glow);
+}
+
+.wg-btn-alt:hover {
+  background: rgba(255, 212, 0, 0.12);
+  color: var(--grin-yellow);
+}
+
+.wg-btn:active {
+  transform: translateY(0);
+}
+
+.wg-hint {
+  margin-top: 1rem;
+  font-size: 0.8rem;
+  color: var(--grin-muted);
+  line-height: 1.4;
+}
+
+.wg-final-score {
+  margin: 0 0 1.25rem;
+  font-size: 1.1rem;
+  color: var(--grin-yellow);
+  font-weight: 600;
+}
+
+.wg-hidden {
+  display: none !important;
+}
+
+@media (max-width: 560px) {
+  .wg-hud-weapons {
+    bottom: 10px;
+    gap: 4px;
+  }
+  .wg-weapon {
+    font-size: 0.7rem;
+    padding: 0.45rem 0.55rem;
+  }
+}
