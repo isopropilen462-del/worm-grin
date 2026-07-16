@@ -14,6 +14,8 @@ export class Worm {
   facing: 1 | -1 = 1;
   aim = -0.4;
   onGround = false;
+  /** Feet touching solid ground (relaxed check for walking). */
+  feetOnGround = false;
   alive = true;
   name: string;
   /** Coyote-time window after leaving ground. */
@@ -101,11 +103,9 @@ export class Worm {
       terrain.isSolid(mid, feet + 1) ||
       terrain.isSolid(left, feet + 1) ||
       terrain.isSolid(right, feet + 1);
-    const headClear =
-      !terrain.isSolid(mid, this.y + 4) &&
-      !terrain.isSolid(left, this.y + 6) &&
-      !terrain.isSolid(right, this.y + 6);
+    const headClear = !terrain.isSolid(mid, this.y + 2);
 
+    this.feetOnGround = feetSolid;
     this.onGround = feetSolid && headClear && Math.abs(this.vy) < 120;
     if (this.onGround) {
       this.coyoteLeft = PHYSICS.coyoteTime;
@@ -126,7 +126,7 @@ export class Worm {
     if (this.vx !== 0) {
       if (terrain.rectSolid(nx, this.y + 2, w, h - 6)) {
         let stepped = false;
-        for (let step = 1; step <= 12; step++) {
+        for (let step = 1; step <= 20; step++) {
           if (!terrain.rectSolid(nx, this.y - step, w, h - 6)) {
             ny = this.y - step;
             this.y = ny;
@@ -171,8 +171,8 @@ export class Worm {
 
     this.refreshGround(terrain, dt);
 
-    if (this.onGround) {
-      this.vx *= Math.pow(0.0001, dt);
+    if (this.feetOnGround && this.onGround) {
+      this.vx *= Math.pow(0.002, dt);
       if (Math.abs(this.vx) < 5) this.vx = 0;
     }
 
@@ -187,7 +187,7 @@ export class Worm {
   }
 
   tryMove(dir: -1 | 1): void {
-    if (!this.alive || !this.onGround) return;
+    if (!this.alive || !this.feetOnGround) return;
     this.facing = dir;
     this.vx = dir * PHYSICS.wormMoveSpeed;
   }

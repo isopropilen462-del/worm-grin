@@ -10,11 +10,17 @@ export interface FireResult {
   airstrike?: AirstrikeMarker;
 }
 
+export interface FireOptions {
+  /** World X coordinate for airstrike / dynamite placement. */
+  targetX?: number;
+}
+
 export function fireWeapon(
   kind: WeaponKind,
   worm: Worm,
   charge: number,
   terrain?: Terrain,
+  options?: FireOptions,
 ): FireResult {
   const power = Math.max(0.15, Math.min(1, charge));
   const angle = worm.aim;
@@ -35,16 +41,24 @@ export function fireWeapon(
   }
 
   if (kind === 'airstrike') {
-    const reach = 200 + power * 500;
-    const tx = Math.max(40, Math.min(WORLD.width - 40, worm.cx + Math.cos(angle) * dir * reach));
+    const tx =
+      options?.targetX ??
+      Math.max(
+        40,
+        Math.min(
+          WORLD.width - 40,
+          worm.cx + Math.cos(angle) * dir * (200 + power * 500),
+        ),
+      );
     return { airstrike: new AirstrikeMarker(tx, worm.team) };
   }
 
   if (kind === 'dynamite') {
-    let px = worm.cx + dir * 22;
+    const minDist = WEAPON.dynamiteRadius * 1.4;
+    let px = options?.targetX ?? worm.cx + dir * minDist;
     let py = worm.feetY - 4;
     if (terrain) {
-      const gy = terrain.groundY(px, worm.feetY - 80, 120);
+      const gy = terrain.groundY(px, 40, WORLD.waterLevel);
       if (gy !== null) py = gy - 4;
     }
     return {

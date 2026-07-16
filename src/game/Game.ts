@@ -14,6 +14,7 @@ import { Input } from './Input';
 import { startLoop, type LoopHandle } from './loop';
 import { Terrain } from './Terrain';
 import { createTeams, type Team } from './Team';
+import type { Worm } from './Worm';
 import { Wind } from './Wind';
 import { TurnSystem } from './TurnSystem';
 import { AiController } from './AiController';
@@ -25,7 +26,7 @@ import {
   updateExplosions,
   type ExplosionEvent,
 } from './Explosion';
-import { fireWeapon } from './weapons/Weapon';
+import { fireWeapon, type FireOptions } from './weapons/Weapon';
 import { drawBackground } from './render/drawBackground';
 import { drawTerrainLayer } from './render/drawTerrain';
 import { drawWorm, drawAim } from './render/drawWorm';
@@ -357,11 +358,12 @@ export class Game {
     }
 
     const instantWeapons: WeaponKind[] = ['melee', 'shotgun', 'airstrike', 'dynamite'];
+    const fireOpts = this.buildFireOptions(active);
 
     if (this.turns.phase === 'control') {
       if (this.input.firePressed) {
         if (instantWeapons.includes(this.turns.weapon)) {
-          this.applyFire(fireWeapon(this.turns.weapon, active, 1, this.terrain));
+          this.applyFire(fireWeapon(this.turns.weapon, active, 1, this.terrain, fireOpts));
         } else {
           this.turns.phase = 'charging';
           this.turns.charging = true;
@@ -371,9 +373,31 @@ export class Game {
     } else if (this.turns.phase === 'charging') {
       this.turns.charge = Math.min(1, this.turns.charge + dt / WEAPON.chargeTime);
       if (this.input.fireReleased || this.turns.charge >= 1) {
-        this.applyFire(fireWeapon(this.turns.weapon, active, this.turns.charge, this.terrain));
+        this.applyFire(
+          fireWeapon(this.turns.weapon, active, this.turns.charge, this.terrain, fireOpts),
+        );
       }
     }
+  }
+
+  private buildFireOptions(active: Worm): FireOptions | undefined {
+    if (this.turns.weapon !== 'airstrike') return undefined;
+    if (this.input.pointerActive) {
+      const tx = Math.max(
+        40,
+        Math.min(WORLD.width - 40, this.input.pointerX + this.camera.x),
+      );
+      return { targetX: tx };
+    }
+    const reach = 700;
+    const tx = Math.max(
+      40,
+      Math.min(
+        WORLD.width - 40,
+        active.cx + Math.cos(active.aim) * active.facing * reach,
+      ),
+    );
+    return { targetX: tx };
   }
 
   private applyFire(result: ReturnType<typeof fireWeapon>): void {

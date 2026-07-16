@@ -34,13 +34,23 @@ export class Terrain {
     const px = this.data.data;
     px.fill(0);
 
-    // Two hills with a valley — classic worms silhouette
+    const phase1 = Math.random() * Math.PI * 2;
+    const phase2 = Math.random() * Math.PI * 2;
+    const phase3 = Math.random() * Math.PI * 2;
+    const amp1 = 70 + Math.random() * 50;
+    const amp2 = 25 + Math.random() * 25;
+    const amp3 = 35 + Math.random() * 35;
+    const baseOffset = -160 + Math.random() * 60;
+    const freq1 = 1.8 + Math.random() * 0.8;
+    const freq2 = 4.2 + Math.random() * 1.8;
+    const freq3 = 0.6 + Math.random() * 0.5;
+
     for (let x = 0; x < width; x++) {
       const t = x / width;
-      const h1 = Math.sin(t * Math.PI * 2.2) * 90;
-      const h2 = Math.sin(t * Math.PI * 5.1 + 1.2) * 35;
-      const h3 = Math.sin(t * Math.PI * 0.8) * 50;
-      const surface = WORLD.waterLevel - 180 + h1 + h2 + h3;
+      const h1 = Math.sin(t * Math.PI * freq1 + phase1) * amp1;
+      const h2 = Math.sin(t * Math.PI * freq2 + phase2) * amp2;
+      const h3 = Math.sin(t * Math.PI * freq3 + phase3) * amp3;
+      const surface = WORLD.waterLevel + baseOffset + h1 + h2 + h3;
 
       for (let y = 0; y < height; y++) {
         if (y >= surface && y < WORLD.waterLevel + 40) {
@@ -62,10 +72,40 @@ export class Terrain {
       }
     }
 
-    // Carve a few caves / overhangs
-    this.carveCircle(220, WORLD.waterLevel - 220, 55);
-    this.carveCircle(1380, WORLD.waterLevel - 200, 48);
-    this.carveCircle(800, WORLD.waterLevel - 160, 40);
+    const caveCount = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < caveCount; i++) {
+      const cx = 120 + Math.random() * (width - 240);
+      const cy = WORLD.waterLevel - 140 - Math.random() * 120;
+      const r = 32 + Math.random() * 35;
+      this.carveCircle(cx, cy, r);
+    }
+
+    if (Math.random() < 0.5) {
+      const plateauX = 0.25 + Math.random() * 0.5;
+      const plateauW = 80 + Math.random() * 120;
+      const plateauH = 20 + Math.random() * 40;
+      const px0 = Math.floor(width * plateauX);
+      for (let x = px0; x < px0 + plateauW && x < width; x++) {
+        const surface = this.groundY(x, 40, WORLD.waterLevel);
+        if (surface === null) continue;
+        for (let y = surface - plateauH; y < surface; y++) {
+          if (y < 0) continue;
+          const idx = (y * width + x) * 4;
+          const isGrass = y >= surface - plateauH && y < surface - plateauH + 6;
+          if (isGrass) {
+            px[idx] = 255;
+            px[idx + 1] = 212;
+            px[idx + 2] = 0;
+          } else {
+            const shade = 50;
+            px[idx] = shade;
+            px[idx + 1] = shade - 8;
+            px[idx + 2] = shade - 18;
+          }
+          px[idx + 3] = 255;
+        }
+      }
+    }
 
     this.ctx.putImageData(this.data, 0, 0);
     this.dirty = false;

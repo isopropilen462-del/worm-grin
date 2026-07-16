@@ -75,12 +75,25 @@ export class AiController {
       return null;
     }
 
-    if (this.decidedWeapon === 'airstrike' || this.decidedWeapon === 'dynamite') {
+    if (this.decidedWeapon === 'airstrike') {
       worm.aim = Math.atan2(foe.cy - worm.cy, (foe.cx - worm.cx) * worm.facing);
       worm.aim = Math.max(-1.35, Math.min(0.55, worm.aim));
       if (this.timer > 0) return null;
       this.stage = 'done';
-      return fireWeapon(this.decidedWeapon, worm, 0.7 + Math.random() * 0.3, terrain);
+      return fireWeapon(this.decidedWeapon, worm, 0.7 + Math.random() * 0.3, terrain, {
+        targetX: foe.cx,
+      });
+    }
+
+    if (this.decidedWeapon === 'dynamite') {
+      const blastSafe = WEAPON.dynamiteRadius * 1.5;
+      const distToFoe = Math.hypot(foe.cx - worm.cx, foe.cy - worm.cy);
+      if (distToFoe < blastSafe * 2 && worm.feetOnGround) {
+        worm.tryMove(foe.cx < worm.cx ? 1 : -1);
+      }
+      if (this.timer > 0) return null;
+      this.stage = 'done';
+      return fireWeapon('dynamite', worm, 1, terrain, { targetX: foe.cx });
     }
 
     if (this.decidedWeapon === 'shotgun') {
