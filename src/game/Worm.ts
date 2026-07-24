@@ -118,30 +118,41 @@ export class Worm {
     if (!this.alive) return;
 
     this.vy += PHYSICS.gravity * dt;
-    let nx = this.x + this.vx * dt;
-    let ny = this.y + this.vy * dt;
     const w = PHYSICS.wormWidth;
     const h = PHYSICS.wormHeight;
 
+    // Resolve horizontal travel one pixel at a time. Testing the whole target
+    // rectangle lets a single rough terrain pixel cancel a movement frame and
+    // creates the "stuck on slope" behaviour.
     if (this.vx !== 0) {
-      if (terrain.rectSolid(nx, this.y + 2, w, h - 6)) {
+      const distance = this.vx * dt;
+      const direction = Math.sign(distance);
+      const steps = Math.ceil(Math.abs(distance));
+      for (let i = 0; i < steps; i++) {
+        const nx = this.x + direction;
+        if (!terrain.rectSolid(nx, this.y + 2, w, h - 7)) {
+          this.x = nx;
+          continue;
+        }
+
         let stepped = false;
-        for (let step = 1; step <= 20; step++) {
-          if (!terrain.rectSolid(nx, this.y - step, w, h - 6)) {
-            ny = this.y - step;
-            this.y = ny;
+        for (let step = 1; step <= 18; step++) {
+          if (!terrain.rectSolid(nx, this.y - step + 2, w, h - 7)) {
+            this.x = nx;
+            this.y -= step;
+            this.vy = Math.min(0, this.vy);
             stepped = true;
             break;
           }
         }
-        if (!stepped) {
-          nx = this.x;
-          this.vx = 0;
-        }
+        if (stepped) continue;
+
+        this.vx = 0;
+        break;
       }
     }
 
-    this.x = nx;
+    const ny = this.y + this.vy * dt;
 
     if (this.vy > 0) {
       if (terrain.rectSolid(this.x + 2, ny, w - 4, h)) {
@@ -187,7 +198,10 @@ export class Worm {
   }
 
   tryMove(dir: -1 | 1): void {
-    if (!this.alive || !this.feetOnGround) return;
+    // Terrain collision is resolved in updatePhysics. Do not gate input on
+    // the sampled feet pixels: at spawn and on uneven slopes that probe can
+    // temporarily miss and make a worm appear permanently stuck.
+    if (!this.alive) return;
     this.facing = dir;
     this.vx = dir * PHYSICS.wormMoveSpeed;
   }

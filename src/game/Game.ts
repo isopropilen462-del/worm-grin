@@ -10,7 +10,7 @@ import {
   type Winner,
 } from './constants';
 import { Camera } from './Camera';
-import { Input } from './Input';
+import { emptyInput, Input, type InputLike } from './Input';
 import { startLoop, type LoopHandle } from './loop';
 import { Terrain } from './Terrain';
 import { createTeams, type Team } from './Team';
@@ -20,7 +20,12 @@ import { TurnSystem } from './TurnSystem';
 import { AiController } from './AiController';
 import { FallingMissile, Projectile } from './Projectile';
 import { AirstrikeMarker } from './AirstrikeMarker';
-import { pickRandomBackground, type BackgroundTheme } from './Background';
+import {
+  backgroundById,
+  pickRandomBackground,
+  type BackgroundId,
+  type BackgroundTheme,
+} from './Background';
 import {
   createExplosion,
   updateExplosions,
@@ -37,6 +42,16 @@ import {
   drawAirstrikeMarker,
 } from './render/drawProjectile';
 import { drawCanvasHud } from './render/drawHud';
+import type { NetSession } from '../net/session';
+import { asSeed, finishRoom } from '../net/rooms';
+import type {
+  CarveSnapshot,
+  GameSnapshot,
+  InputEvent,
+  WormSnapshot,
+} from '../net/types';
+
+const STATE_SEND_INTERVAL = 1 / 12;
 
 export class Game {
   private canvas: HTMLCanvasElement;
@@ -64,6 +79,17 @@ export class Game {
   private menuEl: HTMLElement | null = null;
   private gameOverEl: HTMLElement | null = null;
   private resultEl: HTMLElement | null = null;
+  private lobbyEl: HTMLElement | null = null;
+
+  private net: NetSession | null = null;
+  private pendingState: GameSnapshot | null = null;
+  private carves: CarveSnapshot[] = [];
+  private appliedCarveCount = 0;
+  private stateSeq = 0;
+  private stateSendAcc = 0;
+  private unsubNet: Array<() => void> = [];
+  private guestInputSeq = 0;
+  private serverActionAcc = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -71,6 +97,7 @@ export class Game {
       menuEl?: HTMLElement | null;
       gameOverEl?: HTMLElement | null;
       resultEl?: HTMLElement | null;
+      lobbyEl?: HTMLElement | null;
     },
     options: GameOptions = {},
   ) {
@@ -84,6 +111,7 @@ export class Game {
     this.menuEl = ui.menuEl ?? null;
     this.gameOverEl = ui.gameOverEl ?? null;
     this.resultEl = ui.resultEl ?? null;
+    this.lobbyEl = ui.lobbyEl ?? null;
 
     this.resize();
     window.addEventListener('resize', this.resize);
@@ -95,13 +123,23 @@ export class Game {
   private bindUi(): void {
     this.menuEl?.querySelectorAll('[data-mode]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const mode = (btn as HTMLElement).dataset.mode as MatchMode;
+        const mode = (btn as HTMLElement).dataset.mode as MatchMode | 'online-lobby';
+        if (mode === 'online-lobby') {
+          this.showLobby();
+          return;
+        }
         this.start(mode);
       });
     });
     this.gameOverEl
       ?.querySelector('[data-action="restart"]')
       ?.addEventListener('click', () => this.showMenu());
+    this.lobbyEl
+      ?.querySelector('[data-action="lobby-back"]')
+      ?.addEventListener('click', () => {
+        void this.disconnectNet();
+        this.showMenu();
+      });
     document.querySelectorAll('[data-weapon]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const w = (btn as HTMLElement).dataset.weapon as WeaponKind;
@@ -142,14 +180,32 @@ export class Game {
     this.missiles = [];
     this.airstrikes = [];
     this.explosions = [];
+    this.carves = [];
+    this.appliedCarveCount = 0;
+    this.pendingState = null;
     this.menuEl?.classList.remove('wg-hidden');
     this.gameOverEl?.classList.add('wg-hidden');
+    this.lobbyEl?.classList.add('wg-hidden');
+    this.canvas.closest('.wg-root')?.classList.remove('wg-playing');
+  }
+
+  /** Open online lobby panel (used by UI / deep links). */
+  openLobby(): void {
+    this.showLobby();
+  }
+
+  private showLobby(): void {
+    this.state = 'menu';
+    this.menuEl?.classList.add('wg-hidden');
+    this.gameOverEl?.classList.add('wg-hidden');
+    this.lobbyEl?.classList.remove('wg-hidden');
     this.canvas.closest('.wg-root')?.classList.remove('wg-playing');
   }
 
   private showGameOver(winner: Winner): void {
     this.state = 'gameover';
     this.menuEl?.classList.add('wg-hidden');
+    this.lobbyEl?.classList.add('wg-hidden');
     this.gameOverEl?.classList.remove('wg-hidden');
     this.canvas.closest('.wg-root')?.classList.remove('wg-playing');
     if (this.resultEl) {
@@ -164,6 +220,13 @@ export class Game {
       this.resultEl.textContent = text;
     }
     this.onMatchEnd?.(winner);
+    if (this.net?.role === 'host') {
+      const finalSnap = this.buildSnapshot();
+      finalSnap.winner = winner;
+      void this.net.sendState(finalSnap);
+      void finishRoom(this.net.roomId, winner);
+    }
+    void this.disconnectNet();
   }
 
   start(mode: MatchMode): void {
@@ -178,10 +241,13 @@ export class Game {
     this.missiles = [];
     this.airstrikes = [];
     this.explosions = [];
+    this.carves = [];
+    this.appliedCarveCount = 0;
     this.turns.startMatch(this.teams, this.wind);
     this.ai.reset();
     this.state = 'playing';
     this.menuEl?.classList.add('wg-hidden');
+    this.lobbyEl?.classList.add('wg-hidden');
     this.gameOverEl?.classList.add('wg-hidden');
     this.canvas.closest('.wg-root')?.classList.add('wg-playing');
     this.syncWeaponButtons();
@@ -192,7 +258,74 @@ export class Game {
     }
   }
 
+  /** Host or guest: begin online match from shared seed. */
+  startOnline(
+    session: NetSession,
+    seed: number,
+    backgroundId: BackgroundId,
+  ): void {
+    void this.disconnectNet(false);
+    this.net = session;
+    this.mode = 'online';
+    this.background = backgroundById(backgroundId);
+    this.terrain = new Terrain(WORLD.width, WORLD.height, asSeed(seed));
+    this.wind.reset();
+    const spawnsA = this.terrain.findSpawnPoints(3, 'left');
+    const spawnsB = this.terrain.findSpawnPoints(3, 'right');
+    this.teams = createTeams(spawnsA, spawnsB);
+    this.projectiles = [];
+    this.missiles = [];
+    this.airstrikes = [];
+    this.explosions = [];
+    this.carves = [];
+    this.appliedCarveCount = 0;
+    this.stateSeq = 0;
+    this.stateSendAcc = 0;
+    this.guestInputSeq = 0;
+    this.pendingState = null;
+    this.serverActionAcc = 0;
+    this.turns.startMatch(this.teams, this.wind);
+    this.ai.reset();
+    this.state = 'playing';
+    this.menuEl?.classList.add('wg-hidden');
+    this.lobbyEl?.classList.add('wg-hidden');
+    this.gameOverEl?.classList.add('wg-hidden');
+    this.canvas.closest('.wg-root')?.classList.add('wg-playing');
+    this.syncWeaponButtons();
+
+    // Optional persistent match process. When unavailable, turn-authoritative
+    // browser simulation is used so online play stays responsive.
+    if (import.meta.env.VITE_GAME_SERVER_URL) {
+      void session.connectMatchServer(asSeed(seed)).catch((err) => {
+        console.warn('Match server unavailable, using turn authority', err);
+      });
+    }
+
+    this.unsubNet.push(
+      session.onState((snap) => {
+        if (!this.pendingState || snap.seq >= this.pendingState.seq) {
+          this.pendingState = snap;
+        }
+      }),
+    );
+
+    const w = this.turns.activeWorm;
+    if (w) {
+      this.camera.reset(w.cx - this.viewWidth / 2, w.cy - this.viewHeight / 2);
+    }
+  }
+
+  private async disconnectNet(clearSession = true): Promise<void> {
+    this.unsubNet.forEach((u) => u());
+    this.unsubNet = [];
+    if (clearSession && this.net) {
+      await this.net.destroy();
+      this.net = null;
+    }
+  }
+
   restart(): void {
+    void this.disconnectNet();
     this.showMenu();
   }
 
@@ -205,6 +338,7 @@ export class Game {
   }
 
   destroy(): void {
+    void this.disconnectNet();
     this.loop?.stop();
     this.input.destroy();
     window.removeEventListener('resize', this.resize);
@@ -212,6 +346,21 @@ export class Game {
 
   private isAiControlling(): boolean {
     return this.mode === 'ai' && this.turns.teamIndex === 1;
+  }
+
+  /** This client owns the live simulation for the current turn/resolution. */
+  private isOnlineAuthority(): boolean {
+    return !!this.net && this.turns.teamIndex === this.net.seat;
+  }
+
+  private isMyOnlineTurn(): boolean {
+    return this.isOnlineAuthority();
+  }
+
+  private controlInput(): InputLike {
+    if (!this.net) return this.input;
+    // Turn-authoritative: the active seat always uses its local controls.
+    return this.isOnlineAuthority() ? this.input : emptyInput();
   }
 
   private allWorms() {
@@ -237,33 +386,45 @@ export class Game {
     this.time += dt;
     this.input.beginFrame();
 
+    if (this.mode === 'online' && this.net?.hasMatchServer()) {
+      this.updateMatchServerClient(dt);
+      return;
+    }
+
+    // Online without a dedicated match process: the seat whose turn it is runs
+    // the same browser engine locally and broadcasts snapshots. The other
+    // client only renders — so a sleeping host tab cannot freeze the guest.
+    if (this.mode === 'online' && this.net && !this.isOnlineAuthority()) {
+      if (this.pendingState) {
+        this.applySnapshot(this.pendingState);
+        this.pendingState = null;
+      }
+      // Handoff snapshot may have just made us the authority — keep going.
+      if (!this.isOnlineAuthority()) return;
+    }
+
+    const ctrl = this.controlInput();
+
     const active = this.turns.activeWorm;
     const worms = this.allWorms();
-
-    // Jump & movement input BEFORE physics (fixes missed jumps)
-    if (
+    const localControl =
       active &&
       active.alive &&
       !this.isAiControlling() &&
-      (this.turns.phase === 'control' || this.turns.phase === 'charging')
-    ) {
-      active.handleJumpInput(this.input.jumpPressed || this.input.jump, dt);
+      (this.turns.phase === 'control' || this.turns.phase === 'charging');
 
+    if (localControl) {
+      active.handleJumpInput(ctrl.jumpPressed || ctrl.jump, dt);
       if (this.turns.phase === 'control') {
-        if (this.input.left) active.tryMove(-1);
-        if (this.input.right) active.tryMove(1);
+        if (ctrl.left) active.tryMove(-1);
+        if (ctrl.right) active.tryMove(1);
       }
-    }
-
-    if (this.isAiControlling() && active?.alive && this.turns.phase === 'control') {
-      // AI movement handled in AiController
     }
 
     for (const w of worms) {
       w.updatePhysics(dt, this.terrain);
     }
 
-    // Projectiles with worm collision
     for (const p of this.projectiles) {
       if (!p.alive) continue;
       const boom = p.update(dt, this.terrain, this.wind, PHYSICS.gravity, worms);
@@ -271,7 +432,6 @@ export class Game {
     }
     this.projectiles = this.projectiles.filter((p) => p.alive);
 
-    // Airstrike markers
     for (const a of this.airstrikes) {
       if (!a.alive) continue;
       if (a.update(dt)) {
@@ -281,7 +441,6 @@ export class Game {
     }
     this.airstrikes = this.airstrikes.filter((a) => a.alive);
 
-    // Falling missiles
     for (const m of this.missiles) {
       if (!m.alive) continue;
       if (m.update(dt, this.terrain, worms)) {
@@ -308,26 +467,38 @@ export class Game {
         this.turns.afterResolve();
       }
       this.checkWinner();
+      this.maybeSendState(dt);
       return;
     }
 
     if (this.turns.phase === 'waiting') {
       if (this.turns.tickWait(dt)) {
-        if (this.checkWinner()) return;
+        if (this.checkWinner()) {
+          this.publishState();
+          return;
+        }
+        // Advance locally, then FORCE-publish the handoff snapshot. After
+        // advanceTeam we are no longer authority, so maybeSendState would skip
+        // and the opponent would never learn it is their turn.
         this.turns.advanceTeam(this.teams, this.wind);
         this.ai.reset();
         this.syncWeaponButtons();
+        this.publishState();
+        return;
       }
+      this.maybeSendState(dt);
       return;
     }
 
     if (!active || !active.alive) {
       this.turns.forceEndTurn();
+      this.maybeSendState(dt);
       return;
     }
 
     if (this.turns.tickTimer(dt) === 'timeout') {
       this.turns.forceEndTurn();
+      this.maybeSendState(dt);
       return;
     }
 
@@ -335,21 +506,22 @@ export class Game {
       const result = this.ai.update(dt, active, this.teams[0], this.wind, this.turns, this.terrain);
       if (result) this.applyFire(result);
       this.syncWeaponButtons();
+      this.maybeSendState(dt);
       return;
     }
 
-    const weaponPick = this.weaponFromIndex(this.input.weaponSelect ?? 0);
+    const weaponPick = this.weaponFromIndex(ctrl.weaponSelect ?? 0);
     if (weaponPick) {
       this.turns.weapon = weaponPick;
       this.syncWeaponButtons();
     }
 
-    if (this.input.aimUp) active.aim = Math.max(-1.4, active.aim - 1.6 * dt);
-    if (this.input.aimDown) active.aim = Math.min(0.7, active.aim + 1.6 * dt);
+    if (ctrl.aimUp) active.aim = Math.max(-1.4, active.aim - 1.6 * dt);
+    if (ctrl.aimDown) active.aim = Math.min(0.7, active.aim + 1.6 * dt);
 
-    if (this.input.pointerActive) {
-      const wx = this.input.pointerX + this.camera.x;
-      const wy = this.input.pointerY + this.camera.y;
+    if (ctrl.pointerActive) {
+      const wx = ctrl.pointerX + this.camera.x;
+      const wy = ctrl.pointerY + this.camera.y;
       const dx = (wx - active.cx) * active.facing;
       const dy = wy - active.cy;
       active.aim = Math.max(-1.4, Math.min(0.7, Math.atan2(dy, Math.max(8, dx))));
@@ -358,10 +530,10 @@ export class Game {
     }
 
     const instantWeapons: WeaponKind[] = ['melee', 'shotgun', 'airstrike', 'dynamite'];
-    const fireOpts = this.buildFireOptions(active);
+    const fireOpts = this.buildFireOptions(active, ctrl);
 
     if (this.turns.phase === 'control') {
-      if (this.input.firePressed) {
+      if (ctrl.firePressed) {
         if (instantWeapons.includes(this.turns.weapon)) {
           this.applyFire(fireWeapon(this.turns.weapon, active, 1, this.terrain, fireOpts));
         } else {
@@ -372,20 +544,218 @@ export class Game {
       }
     } else if (this.turns.phase === 'charging') {
       this.turns.charge = Math.min(1, this.turns.charge + dt / WEAPON.chargeTime);
-      if (this.input.fireReleased || this.turns.charge >= 1) {
+      if (ctrl.fireReleased || this.turns.charge >= 1) {
         this.applyFire(
           fireWeapon(this.turns.weapon, active, this.turns.charge, this.terrain, fireOpts),
         );
       }
     }
+
+    this.maybeSendState(dt);
   }
 
-  private buildFireOptions(active: Worm): FireOptions | undefined {
+  private updateMatchServerClient(dt: number): void {
+    const session = this.net;
+    if (!session) return;
+
+    // Clients only render. The persistent Node match server owns physics,
+    // turns, projectiles and timers — even if every browser tab is asleep.
+    if (this.pendingState) {
+      this.applySnapshot(this.pendingState);
+      this.pendingState = null;
+    }
+
+    if (!this.isMyOnlineTurn()) return;
+
+    const snapshot = this.input.snapshot();
+    const events: InputEvent[] = [];
+    if (snapshot.jumpPressed) events.push({ type: 'jump' });
+    if (snapshot.firePressed) events.push({ type: 'fire-press' });
+    if (snapshot.fireReleased) events.push({ type: 'fire-release' });
+    if (snapshot.weaponSelect !== null) {
+      events.push({ type: 'weapon', weapon: snapshot.weaponSelect });
+    }
+
+    this.serverActionAcc += dt;
+    if (events.length === 0 && this.serverActionAcc < 1 / 20) return;
+    this.serverActionAcc = 0;
+
+    void session.sendInput({
+      seq: ++this.guestInputSeq,
+      left: snapshot.left,
+      right: snapshot.right,
+      jump: snapshot.jump,
+      fire: snapshot.fire,
+      aimUp: snapshot.aimUp,
+      aimDown: snapshot.aimDown,
+      pointerActive: snapshot.pointerActive,
+      pointerX: snapshot.pointerX + this.camera.x,
+      pointerY: snapshot.pointerY + this.camera.y,
+      events,
+    });
+  }
+
+  private maybeSendState(dt: number, force = false): void {
+    if (!this.net || !this.isOnlineAuthority()) return;
+    this.stateSendAcc += dt;
+    if (!force && this.stateSendAcc < STATE_SEND_INTERVAL) return;
+    this.stateSendAcc = 0;
+    this.publishState();
+  }
+
+  /** Broadcast current snapshot even after a turn handoff lost authority. */
+  private publishState(): void {
+    if (!this.net) return;
+    this.stateSendAcc = 0;
+    void this.net.sendState(this.buildSnapshot());
+  }
+
+  private buildSnapshot(): GameSnapshot {
+    this.stateSeq += 1;
+    const teams = this.teams!;
+    const snapWorm = (w: Worm): WormSnapshot => ({
+      x: w.x,
+      y: w.y,
+      vx: w.vx,
+      vy: w.vy,
+      hp: w.hp,
+      facing: w.facing,
+      aim: w.aim,
+      alive: w.alive,
+      onGround: w.onGround,
+    });
+    const active = this.turns.activeWorm;
+    return {
+      seq: this.stateSeq,
+      wind: this.wind.value,
+      teamIndex: this.turns.teamIndex,
+      phase: this.turns.phase,
+      timeLeft: this.turns.timeLeft,
+      weapon: this.turns.weapon,
+      charge: this.turns.charge,
+      activeTeam: active?.team ?? this.turns.teamIndex,
+      activeIndex: active?.index ?? 0,
+      teamACursor: teams[0].turnCursor,
+      teamBCursor: teams[1].turnCursor,
+      wormsA: teams[0].worms.map(snapWorm),
+      wormsB: teams[1].worms.map(snapWorm),
+      projectiles: this.projectiles.map((p) => ({
+        x: p.x,
+        y: p.y,
+        vx: p.vx,
+        vy: p.vy,
+        kind: p.kind,
+        fuse: p.fuse,
+        radius: p.radius,
+        damage: p.damage,
+        ownerTeam: p.ownerTeam,
+        stuck: p.stuck,
+        maxTravel: p.maxTravel,
+        traveled: p.traveled,
+      })),
+      missiles: this.missiles.map((m) => ({
+        x: m.x,
+        y: m.y,
+        vy: m.vy,
+        radius: m.radius,
+        damage: m.damage,
+        ownerTeam: m.ownerTeam,
+      })),
+      airstrikes: this.airstrikes.map((a) => ({
+        x: a.x,
+        fuse: a.fuse,
+        ownerTeam: a.ownerTeam,
+      })),
+      explosions: this.explosions.map((e) => ({ ...e })),
+      carves: this.carves.slice(),
+      winner: this.state === 'gameover' ? this.lastWinner() : null,
+      camX: this.camera.x,
+      camY: this.camera.y,
+    };
+  }
+
+  private lastWinner(): Winner | null {
+    if (!this.teams) return null;
+    const a = this.teams[0].isAlive;
+    const b = this.teams[1].isAlive;
+    if (a && b) return null;
+    if (!a && !b) return 'draw';
+    if (a) return 'player';
+    return 'opponent';
+  }
+
+  private applySnapshot(snap: GameSnapshot): void {
+    if (!this.teams) return;
+    this.wind.value = snap.wind;
+    this.turns.teamIndex = snap.teamIndex;
+    this.turns.phase = snap.phase;
+    this.turns.timeLeft = snap.timeLeft;
+    this.turns.weapon = snap.weapon;
+    this.turns.charge = snap.charge;
+    this.turns.charging = snap.phase === 'charging';
+    this.camera.x = snap.camX;
+    this.camera.y = snap.camY;
+
+    const applyWorm = (w: Worm, s: WormSnapshot) => {
+      w.x = s.x;
+      w.y = s.y;
+      w.vx = s.vx;
+      w.vy = s.vy;
+      w.hp = s.hp;
+      w.facing = s.facing;
+      w.aim = s.aim;
+      w.alive = s.alive;
+      w.onGround = s.onGround;
+    };
+    snap.wormsA.forEach((s, i) => applyWorm(this.teams![0].worms[i]!, s));
+    snap.wormsB.forEach((s, i) => applyWorm(this.teams![1].worms[i]!, s));
+    this.turns.activeWorm =
+      this.teams[snap.activeTeam]?.worms[snap.activeIndex] ?? null;
+    this.teams[0].setTurnCursor(snap.teamACursor ?? 0);
+    this.teams[1].setTurnCursor(snap.teamBCursor ?? 0);
+
+    this.projectiles = snap.projectiles.map((p) => {
+      const proj = new Projectile(p.x, p.y, p.vx, p.vy, p.kind, p.ownerTeam);
+      proj.fuse = p.fuse;
+      proj.radius = p.radius;
+      proj.damage = p.damage;
+      proj.stuck = p.stuck;
+      proj.maxTravel = p.maxTravel;
+      proj.traveled = p.traveled;
+      return proj;
+    });
+    this.missiles = snap.missiles.map((m) => {
+      const missile = new FallingMissile(m.x, m.ownerTeam);
+      missile.y = m.y;
+      missile.vy = m.vy;
+      missile.radius = m.radius;
+      missile.damage = m.damage;
+      return missile;
+    });
+    this.airstrikes = snap.airstrikes.map(
+      (a) => new AirstrikeMarker(a.x, a.ownerTeam, a.fuse),
+    );
+    this.explosions = snap.explosions.map((e) => ({ ...e }));
+
+    while (this.appliedCarveCount < snap.carves.length) {
+      const c = snap.carves[this.appliedCarveCount]!;
+      this.terrain.carveCircle(c.x, c.y, c.r);
+      this.appliedCarveCount += 1;
+    }
+
+    this.syncWeaponButtons();
+
+    if (snap.winner) {
+      this.showGameOver(snap.winner);
+    }
+  }
+
+  private buildFireOptions(active: Worm, ctrl: InputLike): FireOptions | undefined {
     if (this.turns.weapon !== 'airstrike') return undefined;
-    if (this.input.pointerActive) {
+    if (ctrl.pointerActive) {
       const tx = Math.max(
         40,
-        Math.min(WORLD.width - 40, this.input.pointerX + this.camera.x),
+        Math.min(WORLD.width - 40, ctrl.pointerX + this.camera.x),
       );
       return { targetX: tx };
     }
@@ -425,7 +795,11 @@ export class Game {
   }
 
   private detonate(x: number, y: number, radius: number, damage: number): void {
-    this.terrain.carveCircle(x, y, radius * 0.85);
+    const r = radius * 0.85;
+    this.terrain.carveCircle(x, y, r);
+    if (this.mode === 'online') {
+      this.carves.push({ x, y, r });
+    }
     this.explosions.push(createExplosion(x, y, radius, damage));
     for (const w of this.allWorms()) {
       if (!w.alive) continue;
@@ -482,13 +856,14 @@ export class Game {
         );
       }
       const active = this.turns.activeWorm;
-      if (
+      const showAim =
         active &&
         active.alive &&
         this.state === 'playing' &&
         !this.isAiControlling() &&
-        (this.turns.phase === 'control' || this.turns.phase === 'charging')
-      ) {
+        (this.turns.phase === 'control' || this.turns.phase === 'charging') &&
+        (!this.net || this.isMyOnlineTurn() || this.net.role === 'host');
+      if (showAim) {
         drawAim(ctx, active, this.camera.x, this.camera.y, this.turns.charge);
       }
     }
@@ -511,6 +886,11 @@ export class Game {
     }
 
     if (this.state === 'playing' && this.teams) {
+      const watching =
+        this.mode === 'online' && this.net && !this.isMyOnlineTurn();
+      const turnLabel = watching
+        ? `${this.teams[this.turns.teamIndex].name} (ожидание)`
+        : this.teams[this.turns.teamIndex].name;
       drawCanvasHud(
         ctx,
         vw,
@@ -518,7 +898,7 @@ export class Game {
         this.wind,
         this.turns.timeLeft,
         this.turns.weapon,
-        this.teams[this.turns.teamIndex].name,
+        turnLabel,
         this.isAiControlling(),
         this.background,
       );

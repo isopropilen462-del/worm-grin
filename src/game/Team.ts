@@ -41,6 +41,14 @@ export class Team {
     }
     return this.worms[this.cursor] ?? null;
   }
+
+  get turnCursor(): number {
+    return this.cursor;
+  }
+
+  setTurnCursor(cursor: number): void {
+    this.cursor = ((cursor % this.worms.length) + this.worms.length) % this.worms.length;
+  }
 }
 
 export function createTeams(

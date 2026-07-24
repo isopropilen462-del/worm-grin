@@ -63,7 +63,14 @@ export const BACKGROUNDS: Record<BackgroundId, BackgroundTheme> = {
   },
 };
 
-export function pickRandomBackground(): BackgroundTheme {
+export function pickRandomBackground(seed?: number): BackgroundTheme {
   const ids = Object.keys(BACKGROUNDS) as BackgroundId[];
-  return BACKGROUNDS[ids[Math.floor(Math.random() * ids.length)]];
+  if (seed === undefined) {
+    return BACKGROUNDS[ids[Math.floor(Math.random() * ids.length)]]!;
+  }
+  return BACKGROUNDS[ids[seed % ids.length]]!;
+}
+
+export function backgroundById(id: BackgroundId): BackgroundTheme {
+  return BACKGROUNDS[id];
 }

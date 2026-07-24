@@ -69,7 +69,7 @@ export const WEAPON = {
 } as const;
 
 export type GameState = 'menu' | 'playing' | 'gameover';
-export type MatchMode = 'ai' | 'hotseat';
+export type MatchMode = 'ai' | 'hotseat' | 'online';
 export type WeaponKind =
   | 'bazooka'
   | 'grenade'
