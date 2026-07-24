@@ -183,8 +183,8 @@ export class FallingMissile {
   vy: number;
   alive = true;
   ownerTeam: 0 | 1;
-  radius = WEAPON.airstrikeRadius;
-  damage = WEAPON.airstrikeDamage;
+  radius: number = WEAPON.airstrikeRadius;
+  damage: number = WEAPON.airstrikeDamage;
 
   constructor(x: number, ownerTeam: 0 | 1) {
     this.x = x;

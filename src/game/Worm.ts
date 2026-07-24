@@ -126,7 +126,7 @@ export class Worm {
     if (this.vx !== 0) {
       if (terrain.rectSolid(nx, this.y + 2, w, h - 6)) {
         let stepped = false;
-        for (let step = 1; step <= 20; step++) {
+        for (let step = 1; step <= 32; step++) {
           if (!terrain.rectSolid(nx, this.y - step, w, h - 6)) {
             ny = this.y - step;
             this.y = ny;
@@ -187,7 +187,10 @@ export class Worm {
   }
 
   tryMove(dir: -1 | 1): void {
-    if (!this.alive || !this.feetOnGround) return;
+    // Terrain collision is resolved in updatePhysics. Do not gate input on
+    // the sampled feet pixels: at spawn and on uneven slopes that probe can
+    // temporarily miss and make a worm appear permanently stuck.
+    if (!this.alive) return;
     this.facing = dir;
     this.vx = dir * PHYSICS.wormMoveSpeed;
   }

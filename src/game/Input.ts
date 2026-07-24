@@ -1,4 +1,38 @@
-export class Input {
+export interface InputLike {
+  left: boolean;
+  right: boolean;
+  jump: boolean;
+  jumpPressed: boolean;
+  fire: boolean;
+  firePressed: boolean;
+  fireReleased: boolean;
+  aimUp: boolean;
+  aimDown: boolean;
+  weaponSelect: number | null;
+  pointerActive: boolean;
+  pointerX: number;
+  pointerY: number;
+}
+
+export function emptyInput(): InputLike {
+  return {
+    left: false,
+    right: false,
+    jump: false,
+    jumpPressed: false,
+    fire: false,
+    firePressed: false,
+    fireReleased: false,
+    aimUp: false,
+    aimDown: false,
+    weaponSelect: null,
+    pointerActive: false,
+    pointerX: 0,
+    pointerY: 0,
+  };
+}
+
+export class Input implements InputLike {
   left = false;
   right = false;
   jump = false;
@@ -107,6 +141,24 @@ export class Input {
       this.keys.has('KeyX') ||
       this.keys.has('Enter') ||
       this.pointerActive;
+  }
+
+  snapshot(): InputLike {
+    return {
+      left: this.left,
+      right: this.right,
+      jump: this.jump,
+      jumpPressed: this.jumpPressed,
+      fire: this.fire,
+      firePressed: this.firePressed,
+      fireReleased: this.fireReleased,
+      aimUp: this.aimUp,
+      aimDown: this.aimDown,
+      weaponSelect: this.weaponSelect,
+      pointerActive: this.pointerActive,
+      pointerX: this.pointerX,
+      pointerY: this.pointerY,
+    };
   }
 
   destroy(): void {

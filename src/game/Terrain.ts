@@ -1,4 +1,5 @@
 import { COLORS, WORLD } from './constants';
+import { SeededRng } from './rng';
 
 /**
  * Destructible terrain as an alpha mask in ImageData.
@@ -11,10 +12,12 @@ export class Terrain {
   private ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
   private data: ImageData;
   private dirty = true;
+  private rng: SeededRng;
 
-  constructor(width = WORLD.width, height = WORLD.height) {
+  constructor(width = WORLD.width, height = WORLD.height, seed?: number) {
     this.width = width;
     this.height = height;
+    this.rng = new SeededRng(seed ?? ((Math.random() * 0xffffffff) >>> 0));
     if (typeof OffscreenCanvas !== 'undefined') {
       this.canvas = new OffscreenCanvas(width, height);
     } else {
@@ -33,17 +36,18 @@ export class Terrain {
     const { width, height } = this;
     const px = this.data.data;
     px.fill(0);
+    const r = this.rng;
 
-    const phase1 = Math.random() * Math.PI * 2;
-    const phase2 = Math.random() * Math.PI * 2;
-    const phase3 = Math.random() * Math.PI * 2;
-    const amp1 = 70 + Math.random() * 50;
-    const amp2 = 25 + Math.random() * 25;
-    const amp3 = 35 + Math.random() * 35;
-    const baseOffset = -160 + Math.random() * 60;
-    const freq1 = 1.8 + Math.random() * 0.8;
-    const freq2 = 4.2 + Math.random() * 1.8;
-    const freq3 = 0.6 + Math.random() * 0.5;
+    const phase1 = r.next() * Math.PI * 2;
+    const phase2 = r.next() * Math.PI * 2;
+    const phase3 = r.next() * Math.PI * 2;
+    const amp1 = 70 + r.next() * 50;
+    const amp2 = 25 + r.next() * 25;
+    const amp3 = 35 + r.next() * 35;
+    const baseOffset = -160 + r.next() * 60;
+    const freq1 = 1.8 + r.next() * 0.8;
+    const freq2 = 4.2 + r.next() * 1.8;
+    const freq3 = 0.6 + r.next() * 0.5;
 
     for (let x = 0; x < width; x++) {
       const t = x / width;
@@ -72,18 +76,18 @@ export class Terrain {
       }
     }
 
-    const caveCount = 2 + Math.floor(Math.random() * 3);
+    const caveCount = 2 + Math.floor(r.next() * 3);
     for (let i = 0; i < caveCount; i++) {
-      const cx = 120 + Math.random() * (width - 240);
-      const cy = WORLD.waterLevel - 140 - Math.random() * 120;
-      const r = 32 + Math.random() * 35;
-      this.carveCircle(cx, cy, r);
+      const cx = 120 + r.next() * (width - 240);
+      const cy = WORLD.waterLevel - 140 - r.next() * 120;
+      const radius = 32 + r.next() * 35;
+      this.carveCircle(cx, cy, radius);
     }
 
-    if (Math.random() < 0.5) {
-      const plateauX = 0.25 + Math.random() * 0.5;
-      const plateauW = 80 + Math.random() * 120;
-      const plateauH = 20 + Math.random() * 40;
+    if (r.next() < 0.5) {
+      const plateauX = 0.25 + r.next() * 0.5;
+      const plateauW = 80 + r.next() * 120;
+      const plateauH = 20 + r.next() * 40;
       const px0 = Math.floor(width * plateauX);
       for (let x = px0; x < px0 + plateauW && x < width; x++) {
         const surface = this.groundY(x, 40, WORLD.waterLevel);
@@ -190,7 +194,7 @@ export class Terrain {
     let attempts = 0;
     while (points.length < count && attempts < 400) {
       attempts++;
-      const x = xMin + Math.random() * (xMax - xMin);
+      const x = xMin + this.rng.next() * (xMax - xMin);
       // Scan from sky down for first solid
       let found: number | null = null;
       for (let y = 40; y < WORLD.waterLevel; y++) {
