@@ -82,20 +82,13 @@ export class Game {
   private lobbyEl: HTMLElement | null = null;
 
   private net: NetSession | null = null;
-  private remoteInput: InputLike = emptyInput();
   private pendingState: GameSnapshot | null = null;
   private carves: CarveSnapshot[] = [];
   private appliedCarveCount = 0;
   private stateSeq = 0;
   private stateSendAcc = 0;
   private unsubNet: Array<() => void> = [];
-  private inputSendAcc = 0;
   private guestInputSeq = 0;
-  private lastRemoteInputSeq = 0;
-  private remoteEvents: InputEvent[] = [];
-  private serverStatePollAcc = 0;
-  private serverStateRequestPending = false;
-  private serverActionPending = false;
   private serverActionAcc = 0;
 
   constructor(
@@ -288,14 +281,8 @@ export class Game {
     this.appliedCarveCount = 0;
     this.stateSeq = 0;
     this.stateSendAcc = 0;
-    this.remoteInput = emptyInput();
     this.guestInputSeq = 0;
-    this.lastRemoteInputSeq = 0;
-    this.remoteEvents = [];
     this.pendingState = null;
-    this.serverStatePollAcc = 0;
-    this.serverStateRequestPending = false;
-    this.serverActionPending = false;
     this.serverActionAcc = 0;
     this.turns.startMatch(this.teams, this.wind);
     this.ai.reset();
@@ -306,25 +293,14 @@ export class Game {
     this.canvas.closest('.wg-root')?.classList.add('wg-playing');
     this.syncWeaponButtons();
 
-    this.unsubNet.push(
-      session.onInput((snap) => {
-        if (snap.seq <= this.lastRemoteInputSeq) return;
-        this.lastRemoteInputSeq = snap.seq;
-        this.remoteInput = {
-          ...this.remoteInput,
-          left: snap.left,
-          right: snap.right,
-          jump: snap.jump,
-          fire: snap.fire,
-          aimUp: snap.aimUp,
-          aimDown: snap.aimDown,
-          pointerActive: snap.pointerActive,
-          pointerX: snap.pointerX,
-          pointerY: snap.pointerY,
-        };
-        this.remoteEvents.push(...snap.events);
-      }),
-    );
+    // Optional persistent match process. When unavailable, turn-authoritative
+    // browser simulation is used so online play stays responsive.
+    if (import.meta.env.VITE_GAME_SERVER_URL) {
+      void session.connectMatchServer(asSeed(seed)).catch((err) => {
+        console.warn('Match server unavailable, using turn authority', err);
+      });
+    }
+
     this.unsubNet.push(
       session.onState((snap) => {
         if (!this.pendingState || snap.seq >= this.pendingState.seq) {
@@ -372,16 +348,19 @@ export class Game {
     return this.mode === 'ai' && this.turns.teamIndex === 1;
   }
 
-  private isMyOnlineTurn(): boolean {
+  /** This client owns the live simulation for the current turn/resolution. */
+  private isOnlineAuthority(): boolean {
     return !!this.net && this.turns.teamIndex === this.net.seat;
+  }
+
+  private isMyOnlineTurn(): boolean {
+    return this.isOnlineAuthority();
   }
 
   private controlInput(): InputLike {
     if (!this.net) return this.input;
-    if (this.net.role === 'host') {
-      return this.turns.teamIndex === 0 ? this.input : this.remoteInput;
-    }
-    return emptyInput();
+    // Turn-authoritative: the active seat always uses its local controls.
+    return this.isOnlineAuthority() ? this.input : emptyInput();
   }
 
   private allWorms() {
@@ -407,41 +386,15 @@ export class Game {
     this.time += dt;
     this.input.beginFrame();
 
-    if (this.mode === 'online' && this.net) {
-      this.updateServerAuthoritativeOnline(dt);
+    if (this.mode === 'online' && this.net?.hasMatchServer()) {
+      this.updateMatchServerClient(dt);
       return;
     }
 
-    // Guest: send snapshots for held controls and immediate, ordered events
-    // for presses/releases. A fast mouse/key press must not be lost between
-    // 30 Hz heartbeat packets.
-    if (this.net?.role === 'guest') {
-      const snapshot = this.input.snapshot();
-      const events: InputEvent[] = [];
-      if (snapshot.jumpPressed) events.push({ type: 'jump' });
-      if (snapshot.firePressed) events.push({ type: 'fire-press' });
-      if (snapshot.fireReleased) events.push({ type: 'fire-release' });
-      if (snapshot.weaponSelect !== null) {
-        events.push({ type: 'weapon', weapon: snapshot.weaponSelect });
-      }
-
-      this.inputSendAcc += dt;
-      if (events.length > 0 || this.inputSendAcc >= 1 / 30) {
-        this.inputSendAcc = 0;
-        void this.net.sendInput({
-          seq: ++this.guestInputSeq,
-          left: snapshot.left,
-          right: snapshot.right,
-          jump: snapshot.jump,
-          fire: snapshot.fire,
-          aimUp: snapshot.aimUp,
-          aimDown: snapshot.aimDown,
-          pointerActive: snapshot.pointerActive,
-          pointerX: snapshot.pointerX,
-          pointerY: snapshot.pointerY,
-          events,
-        });
-      }
+    // Online without a dedicated match process: the seat whose turn it is runs
+    // the same browser engine locally and broadcasts snapshots. The other
+    // client only renders — so a sleeping host tab cannot freeze the guest.
+    if (this.mode === 'online' && this.net && !this.isOnlineAuthority()) {
       if (this.pendingState) {
         this.applySnapshot(this.pendingState);
         this.pendingState = null;
@@ -450,12 +403,6 @@ export class Game {
     }
 
     const ctrl = this.controlInput();
-    const remoteEvents =
-      this.net?.role === 'host' &&
-      this.turns.teamIndex === 1 &&
-      (this.turns.phase === 'control' || this.turns.phase === 'charging')
-        ? this.takeRemoteEvents()
-        : [];
 
     const active = this.turns.activeWorm;
     const worms = this.allWorms();
@@ -466,8 +413,7 @@ export class Game {
       (this.turns.phase === 'control' || this.turns.phase === 'charging');
 
     if (localControl) {
-      const remoteJump = remoteEvents.some((event) => event.type === 'jump');
-      active.handleJumpInput(ctrl.jumpPressed || remoteJump || ctrl.jump, dt);
+      active.handleJumpInput(ctrl.jumpPressed || ctrl.jump, dt);
       if (this.turns.phase === 'control') {
         if (ctrl.left) active.tryMove(-1);
         if (ctrl.right) active.tryMove(1);
@@ -521,7 +467,6 @@ export class Game {
       }
       this.checkWinner();
       this.maybeSendState(dt);
-      this.clearRemoteEdges();
       return;
     }
 
@@ -536,21 +481,18 @@ export class Game {
         this.syncWeaponButtons();
       }
       this.maybeSendState(dt);
-      this.clearRemoteEdges();
       return;
     }
 
     if (!active || !active.alive) {
       this.turns.forceEndTurn();
       this.maybeSendState(dt);
-      this.clearRemoteEdges();
       return;
     }
 
     if (this.turns.tickTimer(dt) === 'timeout') {
       this.turns.forceEndTurn();
       this.maybeSendState(dt);
-      this.clearRemoteEdges();
       return;
     }
 
@@ -562,13 +504,7 @@ export class Game {
       return;
     }
 
-    const remoteWeapon = remoteEvents.find(
-      (event): event is Extract<InputEvent, { type: 'weapon' }> =>
-        event.type === 'weapon',
-    );
-    const weaponPick = this.weaponFromIndex(
-      remoteWeapon?.weapon ?? ctrl.weaponSelect ?? 0,
-    );
+    const weaponPick = this.weaponFromIndex(ctrl.weaponSelect ?? 0);
     if (weaponPick) {
       this.turns.weapon = weaponPick;
       this.syncWeaponButtons();
@@ -591,10 +527,7 @@ export class Game {
     const fireOpts = this.buildFireOptions(active, ctrl);
 
     if (this.turns.phase === 'control') {
-      const remoteFirePressed = remoteEvents.some(
-        (event) => event.type === 'fire-press',
-      );
-      if (ctrl.firePressed || remoteFirePressed) {
+      if (ctrl.firePressed) {
         if (instantWeapons.includes(this.turns.weapon)) {
           this.applyFire(fireWeapon(this.turns.weapon, active, 1, this.terrain, fireOpts));
         } else {
@@ -605,10 +538,7 @@ export class Game {
       }
     } else if (this.turns.phase === 'charging') {
       this.turns.charge = Math.min(1, this.turns.charge + dt / WEAPON.chargeTime);
-      const remoteFireReleased = remoteEvents.some(
-        (event) => event.type === 'fire-release',
-      );
-      if (ctrl.fireReleased || remoteFireReleased || this.turns.charge >= 1) {
+      if (ctrl.fireReleased || this.turns.charge >= 1) {
         this.applyFire(
           fireWeapon(this.turns.weapon, active, this.turns.charge, this.terrain, fireOpts),
         );
@@ -616,49 +546,17 @@ export class Game {
     }
 
     this.maybeSendState(dt);
-    this.clearRemoteEdges();
   }
 
-  private takeRemoteEvents(): InputEvent[] {
-    const events = this.remoteEvents;
-    this.remoteEvents = [];
-    return events;
-  }
-
-  private clearRemoteEdges(): void {
-    // Discrete remote commands are drained by takeRemoteEvents(). This method
-    // remains a no-op at early returns so future input fields aren't reset.
-  }
-
-  private updateServerAuthoritativeOnline(dt: number): void {
+  private updateMatchServerClient(dt: number): void {
     const session = this.net;
     if (!session) return;
 
+    // Clients only render. The persistent Node match server owns physics,
+    // turns, projectiles and timers — even if every browser tab is asleep.
     if (this.pendingState) {
       this.applySnapshot(this.pendingState);
       this.pendingState = null;
-    }
-
-    // State lives in Supabase, so a reconnecting or inactive player always
-    // catches up without relying on the other browser to broadcast frames.
-    this.serverStatePollAcc += dt;
-    if (
-      !this.isMyOnlineTurn() &&
-      this.serverStatePollAcc >= 1 &&
-      !this.serverStateRequestPending
-    ) {
-      this.serverStatePollAcc = 0;
-      this.serverStateRequestPending = true;
-      void session.fetchAuthoritativeState()
-        .then((state) => {
-          if (state) this.pendingState = state;
-        })
-        .catch(() => {
-          // The next poll will retry; gameplay continues with the last state.
-        })
-        .finally(() => {
-          this.serverStateRequestPending = false;
-        });
     }
 
     if (!this.isMyOnlineTurn()) return;
@@ -672,19 +570,11 @@ export class Game {
       events.push({ type: 'weapon', weapon: snapshot.weaponSelect });
     }
 
-    // Do not turn every animation frame into an Edge Function invocation.
-    // One request is allowed at a time; the server advances its fixed-step
-    // simulation by the accumulated time and remains authoritative.
     this.serverActionAcc += dt;
-    if (
-      this.serverActionPending ||
-      (events.length === 0 && this.serverActionAcc < 0.1)
-    ) return;
-    const elapsedMs = Math.round(Math.min(0.25, this.serverActionAcc) * 1000);
+    if (events.length === 0 && this.serverActionAcc < 1 / 20) return;
     this.serverActionAcc = 0;
-    this.serverActionPending = true;
 
-    void session.sendAuthoritativeInput({
+    void session.sendInput({
       seq: ++this.guestInputSeq,
       left: snapshot.left,
       right: snapshot.right,
@@ -696,17 +586,11 @@ export class Game {
       pointerX: snapshot.pointerX + this.camera.x,
       pointerY: snapshot.pointerY + this.camera.y,
       events,
-    }, elapsedMs).then((state) => {
-      if (state) this.pendingState = state;
-    }).catch(() => {
-      // Keep the local input loop alive; the next heartbeat retries.
-    }).finally(() => {
-      this.serverActionPending = false;
     });
   }
 
   private maybeSendState(dt: number, force = false): void {
-    if (!this.net || this.net.role !== 'host') return;
+    if (!this.net || !this.isOnlineAuthority()) return;
     this.stateSendAcc += dt;
     if (!force && this.stateSendAcc < STATE_SEND_INTERVAL) return;
     this.stateSendAcc = 0;

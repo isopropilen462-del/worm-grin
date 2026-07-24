@@ -220,6 +220,17 @@ export class MatchEngine {
       facing: worm.facing, aim: worm.aim, alive: worm.alive, onGround: worm.onGround,
     });
     const active = this.turns.activeWorm;
+    const follow =
+      this.missiles.find((m) => m.alive) ??
+      this.projectiles.find((p) => p.alive) ??
+      (this.explosions[0] ? { x: this.explosions[0].x, y: this.explosions[0].y } : null) ??
+      active;
+    const camX = follow
+      ? ('cx' in follow ? follow.cx : follow.x) - 450
+      : 0;
+    const camY = follow
+      ? ('cy' in follow ? follow.cy : follow.y) - 280
+      : 0;
     return {
       seq: this.seq,
       wind: this.wind.value,
@@ -240,8 +251,8 @@ export class MatchEngine {
       explosions: this.explosions.map((e) => ({ ...e })),
       carves: this.carves.slice(),
       winner: this.winner,
-      camX: 0,
-      camY: 0,
+      camX,
+      camY,
     };
   }
 

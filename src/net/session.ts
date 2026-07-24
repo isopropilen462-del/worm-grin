@@ -4,11 +4,30 @@ import type { GameSnapshot, InputSnapshot, MatchStartPayload, OnlineRole } from 
 
 type Handler<T> = (payload: T) => void;
 
+function gameServerUrl(): string {
+  const configured = import.meta.env.VITE_GAME_SERVER_URL as string | undefined;
+  if (configured) return configured.replace(/\/$/, '');
+  // Local default used by `npm run server`.
+  return 'http://127.0.0.1:8787';
+}
+
+function gameServerWsUrl(): string {
+  const http = gameServerUrl();
+  if (http.startsWith('https://')) return `wss://${http.slice('https://'.length)}`;
+  if (http.startsWith('http://')) return `ws://${http.slice('http://'.length)}`;
+  return http;
+}
+
+/**
+ * Online transport: Supabase Realtime for lobby peer/start signals, plus a
+ * persistent WebSocket match server that owns the simulation.
+ */
 export class NetSession {
   readonly role: OnlineRole;
   readonly roomCode: string;
   readonly roomId: string;
   private channel: RealtimeChannel;
+  private matchSocket: WebSocket | null = null;
   private onInputHandlers: Handler<InputSnapshot>[] = [];
   private onStateHandlers: Handler<GameSnapshot>[] = [];
   private onStartHandlers: Handler<MatchStartPayload>[] = [];
@@ -98,8 +117,93 @@ export class NetSession {
     };
   }
 
+  hasMatchServer(): boolean {
+    return !!this.matchSocket && this.matchSocket.readyState === WebSocket.OPEN;
+  }
+
+  /** Open the persistent match-server socket that runs the simulation. */
+  async connectMatchServer(seed: number): Promise<void> {
+    if (this.destroyed) return;
+    if (this.matchSocket && this.matchSocket.readyState === WebSocket.OPEN) return;
+
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(gameServerWsUrl());
+      this.matchSocket = ws;
+      const timer = window.setTimeout(() => {
+        reject(new Error('Match server connection timed out'));
+        ws.close();
+      }, 8000);
+
+      ws.onopen = () => {
+        ws.send(
+          JSON.stringify({
+            type: 'hello',
+            roomCode: this.roomCode,
+            roomId: this.roomId,
+            playerId: getPlayerId(),
+            role: this.role,
+            seed,
+          }),
+        );
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(String(event.data)) as {
+            type: string;
+            state?: GameSnapshot;
+            message?: string;
+          };
+          if (message.type === 'welcome') {
+            window.clearTimeout(timer);
+            resolve();
+            return;
+          }
+          if (message.type === 'state' && message.state) {
+            this.onStateHandlers.forEach((h) => h(message.state!));
+            return;
+          }
+          if (message.type === 'error') {
+            window.clearTimeout(timer);
+            reject(new Error(message.message || 'Match server error'));
+          }
+        } catch {
+          // Ignore malformed packets; the next state will resync.
+        }
+      };
+
+      ws.onerror = () => {
+        window.clearTimeout(timer);
+        reject(new Error('Match server unavailable'));
+      };
+
+      ws.onclose = () => {
+        if (this.matchSocket === ws) this.matchSocket = null;
+      };
+    });
+  }
+
   async sendInput(input: InputSnapshot): Promise<void> {
     if (this.destroyed) return;
+    // Prefer the persistent match server; fall back to Realtime only for lobby.
+    if (this.matchSocket && this.matchSocket.readyState === WebSocket.OPEN) {
+      this.matchSocket.send(
+        JSON.stringify({
+          type: 'input',
+          left: input.left,
+          right: input.right,
+          jump: input.jump,
+          fire: input.fire,
+          aimUp: input.aimUp,
+          aimDown: input.aimDown,
+          pointerActive: input.pointerActive,
+          pointerX: input.pointerX,
+          pointerY: input.pointerY,
+          events: input.events,
+        }),
+      );
+      return;
+    }
     await this.channel.send({
       type: 'broadcast',
       event: 'input',
@@ -107,39 +211,13 @@ export class NetSession {
     });
   }
 
-  /**
-   * Submit a turn command to the Edge Function. The function owns the
-   * simulation, persists the resulting snapshot, and returns it immediately
-   * to the player who issued the command.
-   */
-  async sendAuthoritativeInput(
-    input: InputSnapshot,
-    elapsedMs: number,
-  ): Promise<GameSnapshot | null> {
-    if (this.destroyed) return null;
-    const { data, error } = await getSupabase().functions.invoke('match-action', {
-      body: {
-        roomCode: this.roomCode,
-        playerId: getPlayerId(),
-        sequence: input.seq,
-        elapsedMs,
-        input,
-      },
-    });
-    if (error) throw error;
-    return (data?.state as GameSnapshot | undefined) ?? null;
+  async sendAuthoritativeInput(input: InputSnapshot): Promise<GameSnapshot | null> {
+    await this.sendInput(input);
+    return null;
   }
 
-  /** Read the persisted state so a client can recover after reconnecting. */
   async fetchAuthoritativeState(): Promise<GameSnapshot | null> {
-    if (this.destroyed) return null;
-    const { data, error } = await getSupabase()
-      .from('rooms')
-      .select('match_state')
-      .eq('id', this.roomId)
-      .maybeSingle();
-    if (error) throw error;
-    return (data?.match_state as GameSnapshot | undefined) ?? null;
+    return null;
   }
 
   async sendState(state: GameSnapshot): Promise<void> {
@@ -176,6 +254,14 @@ export class NetSession {
     this.onStateHandlers = [];
     this.onStartHandlers = [];
     this.onPeerHandlers = [];
+    if (this.matchSocket) {
+      this.matchSocket.close();
+      this.matchSocket = null;
+    }
     await getSupabase().removeChannel(this.channel);
   }
+}
+
+export function isMatchServerConfigured(): boolean {
+  return Boolean(import.meta.env.VITE_GAME_SERVER_URL);
 }

@@ -7,13 +7,19 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "build:lib": "tsc && vite build --mode lib",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "tsx server/index.ts",
+    "server:build": "esbuild server/index.ts --bundle --platform=node --format=esm --outfile=server/dist/index.js --packages=external"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.23.1",
     "typescript": "~5.7.2",
     "vite": "^6.0.5"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.110.8"
+    "@supabase/supabase-js": "^2.110.8",
+    "ws": "^8.21.1"
   }
 }
