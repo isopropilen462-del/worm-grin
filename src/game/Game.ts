@@ -399,7 +399,8 @@ export class Game {
         this.applySnapshot(this.pendingState);
         this.pendingState = null;
       }
-      return;
+      // Handoff snapshot may have just made us the authority — keep going.
+      if (!this.isOnlineAuthority()) return;
     }
 
     const ctrl = this.controlInput();
@@ -473,12 +474,17 @@ export class Game {
     if (this.turns.phase === 'waiting') {
       if (this.turns.tickWait(dt)) {
         if (this.checkWinner()) {
-          this.maybeSendState(dt, true);
+          this.publishState();
           return;
         }
+        // Advance locally, then FORCE-publish the handoff snapshot. After
+        // advanceTeam we are no longer authority, so maybeSendState would skip
+        // and the opponent would never learn it is their turn.
         this.turns.advanceTeam(this.teams, this.wind);
         this.ai.reset();
         this.syncWeaponButtons();
+        this.publishState();
+        return;
       }
       this.maybeSendState(dt);
       return;
@@ -593,6 +599,13 @@ export class Game {
     if (!this.net || !this.isOnlineAuthority()) return;
     this.stateSendAcc += dt;
     if (!force && this.stateSendAcc < STATE_SEND_INTERVAL) return;
+    this.stateSendAcc = 0;
+    this.publishState();
+  }
+
+  /** Broadcast current snapshot even after a turn handoff lost authority. */
+  private publishState(): void {
+    if (!this.net) return;
     this.stateSendAcc = 0;
     void this.net.sendState(this.buildSnapshot());
   }
