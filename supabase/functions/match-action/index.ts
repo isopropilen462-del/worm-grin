@@ -1,8 +1,22 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { MatchEngine } from "./engine/MatchEngine.ts";
-import type { InputLike } from "./game/Input.ts";
-import type { GameSnapshot } from "./net/types.ts";
+import { MatchEngine } from "https://raw.githubusercontent.com/isopropilen462-del/worm-grin/c9262e7/supabase/functions/match-action/engine.js";
+
+interface InputLike {
+  left: boolean;
+  right: boolean;
+  jump: boolean;
+  jumpPressed: boolean;
+  fire: boolean;
+  firePressed: boolean;
+  fireReleased: boolean;
+  aimUp: boolean;
+  aimDown: boolean;
+  weaponSelect: number | null;
+  pointerActive: boolean;
+  pointerX: number;
+  pointerY: number;
+}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -90,7 +104,7 @@ Deno.serve(async (request) => {
       return new Response(JSON.stringify({ state: room.match_state, duplicate: true }), { headers: corsHeaders });
     }
 
-    const engine = new MatchEngine(Number(room.seed), room.match_state as GameSnapshot | undefined);
+    const engine = new MatchEngine(Number(room.seed), room.match_state ?? undefined);
     const before = engine.snapshot();
     if (before.teamIndex !== seat) {
       return new Response(JSON.stringify({ state: before, waiting: true }), { status: 409, headers: corsHeaders });
