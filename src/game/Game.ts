@@ -438,7 +438,9 @@ export class Game {
 
     const ctrl = this.controlInput();
     const remoteEvents =
-      this.net?.role === 'host' && this.turns.teamIndex === 1
+      this.net?.role === 'host' &&
+      this.turns.teamIndex === 1 &&
+      (this.turns.phase === 'control' || this.turns.phase === 'charging')
         ? this.takeRemoteEvents()
         : [];
 
