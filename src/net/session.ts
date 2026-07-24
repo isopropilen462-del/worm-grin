@@ -112,13 +112,17 @@ export class NetSession {
    * simulation, persists the resulting snapshot, and returns it immediately
    * to the player who issued the command.
    */
-  async sendAuthoritativeInput(input: InputSnapshot): Promise<GameSnapshot | null> {
+  async sendAuthoritativeInput(
+    input: InputSnapshot,
+    elapsedMs: number,
+  ): Promise<GameSnapshot | null> {
     if (this.destroyed) return null;
     const { data, error } = await getSupabase().functions.invoke('match-action', {
       body: {
         roomCode: this.roomCode,
         playerId: getPlayerId(),
         sequence: input.seq,
+        elapsedMs,
         input,
       },
     });

@@ -95,6 +95,8 @@ export class Game {
   private remoteEvents: InputEvent[] = [];
   private serverStatePollAcc = 0;
   private serverStateRequestPending = false;
+  private serverActionPending = false;
+  private serverActionAcc = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -293,6 +295,8 @@ export class Game {
     this.pendingState = null;
     this.serverStatePollAcc = 0;
     this.serverStateRequestPending = false;
+    this.serverActionPending = false;
+    this.serverActionAcc = 0;
     this.turns.startMatch(this.teams, this.wind);
     this.ai.reset();
     this.state = 'playing';
@@ -638,7 +642,11 @@ export class Game {
     // State lives in Supabase, so a reconnecting or inactive player always
     // catches up without relying on the other browser to broadcast frames.
     this.serverStatePollAcc += dt;
-    if (this.serverStatePollAcc >= 0.4 && !this.serverStateRequestPending) {
+    if (
+      !this.isMyOnlineTurn() &&
+      this.serverStatePollAcc >= 1 &&
+      !this.serverStateRequestPending
+    ) {
       this.serverStatePollAcc = 0;
       this.serverStateRequestPending = true;
       void session.fetchAuthoritativeState()
@@ -664,9 +672,17 @@ export class Game {
       events.push({ type: 'weapon', weapon: snapshot.weaponSelect });
     }
 
-    this.inputSendAcc += dt;
-    if (events.length === 0 && this.inputSendAcc < 1 / 30) return;
-    this.inputSendAcc = 0;
+    // Do not turn every animation frame into an Edge Function invocation.
+    // One request is allowed at a time; the server advances its fixed-step
+    // simulation by the accumulated time and remains authoritative.
+    this.serverActionAcc += dt;
+    if (
+      this.serverActionPending ||
+      (events.length === 0 && this.serverActionAcc < 0.1)
+    ) return;
+    const elapsedMs = Math.round(Math.min(0.25, this.serverActionAcc) * 1000);
+    this.serverActionAcc = 0;
+    this.serverActionPending = true;
 
     void session.sendAuthoritativeInput({
       seq: ++this.guestInputSeq,
@@ -680,10 +696,12 @@ export class Game {
       pointerX: snapshot.pointerX + this.camera.x,
       pointerY: snapshot.pointerY + this.camera.y,
       events,
-    }).then((state) => {
+    }, elapsedMs).then((state) => {
       if (state) this.pendingState = state;
     }).catch(() => {
       // Keep the local input loop alive; the next heartbeat retries.
+    }).finally(() => {
+      this.serverActionPending = false;
     });
   }
 

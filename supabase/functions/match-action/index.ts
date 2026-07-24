@@ -71,6 +71,10 @@ Deno.serve(async (request) => {
     const roomCode = typeof body.roomCode === "string" ? body.roomCode.toUpperCase() : "";
     const playerId = typeof body.playerId === "string" ? body.playerId : "";
     const sequence = Number.isSafeInteger(body.sequence) ? body.sequence : 0;
+    const elapsedMs =
+      typeof body.elapsedMs === "number" && Number.isFinite(body.elapsedMs)
+        ? Math.max(33, Math.min(250, body.elapsedMs))
+        : 100;
     if (!roomCode || !playerId || sequence < 1) {
       return new Response(JSON.stringify({ error: "Invalid match command" }), { status: 400, headers: corsHeaders });
     }
@@ -111,7 +115,7 @@ Deno.serve(async (request) => {
     }
 
     const input = toInput(body.input);
-    engine.step(input, 1 / 30);
+    engine.step(input, elapsedMs / 1000);
     const state = engine.snapshot();
 
     const { error: commandError } = await supabase.from("match_inputs").insert({
