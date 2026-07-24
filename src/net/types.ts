@@ -93,6 +93,8 @@ export interface GameSnapshot {
   charge: number;
   activeTeam: 0 | 1;
   activeIndex: number;
+  teamACursor: number;
+  teamBCursor: number;
   wormsA: WormSnapshot[];
   wormsB: WormSnapshot[];
   projectiles: ProjectileSnapshot[];

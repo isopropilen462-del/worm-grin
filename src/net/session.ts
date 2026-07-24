@@ -1,5 +1,5 @@
 import type { RealtimeChannel } from '@supabase/supabase-js';
-import { getSupabase } from './supabase';
+import { getPlayerId, getSupabase } from './supabase';
 import type { GameSnapshot, InputSnapshot, MatchStartPayload, OnlineRole } from './types';
 
 type Handler<T> = (payload: T) => void;
@@ -105,6 +105,37 @@ export class NetSession {
       event: 'input',
       payload: input,
     });
+  }
+
+  /**
+   * Submit a turn command to the Edge Function. The function owns the
+   * simulation, persists the resulting snapshot, and returns it immediately
+   * to the player who issued the command.
+   */
+  async sendAuthoritativeInput(input: InputSnapshot): Promise<GameSnapshot | null> {
+    if (this.destroyed) return null;
+    const { data, error } = await getSupabase().functions.invoke('match-action', {
+      body: {
+        roomCode: this.roomCode,
+        playerId: getPlayerId(),
+        sequence: input.seq,
+        input,
+      },
+    });
+    if (error) throw error;
+    return (data?.state as GameSnapshot | undefined) ?? null;
+  }
+
+  /** Read the persisted state so a client can recover after reconnecting. */
+  async fetchAuthoritativeState(): Promise<GameSnapshot | null> {
+    if (this.destroyed) return null;
+    const { data, error } = await getSupabase()
+      .from('rooms')
+      .select('match_state')
+      .eq('id', this.roomId)
+      .maybeSingle();
+    if (error) throw error;
+    return (data?.match_state as GameSnapshot | undefined) ?? null;
   }
 
   async sendState(state: GameSnapshot): Promise<void> {

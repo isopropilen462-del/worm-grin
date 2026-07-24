@@ -93,6 +93,8 @@ export class Game {
   private guestInputSeq = 0;
   private lastRemoteInputSeq = 0;
   private remoteEvents: InputEvent[] = [];
+  private serverStatePollAcc = 0;
+  private serverStateRequestPending = false;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -289,6 +291,8 @@ export class Game {
     this.lastRemoteInputSeq = 0;
     this.remoteEvents = [];
     this.pendingState = null;
+    this.serverStatePollAcc = 0;
+    this.serverStateRequestPending = false;
     this.turns.startMatch(this.teams, this.wind);
     this.ai.reset();
     this.state = 'playing';
@@ -398,6 +402,11 @@ export class Game {
 
     this.time += dt;
     this.input.beginFrame();
+
+    if (this.mode === 'online' && this.net) {
+      this.updateServerAuthoritativeOnline(dt);
+      return;
+    }
 
     // Guest: send snapshots for held controls and immediate, ordered events
     // for presses/releases. A fast mouse/key press must not be lost between
@@ -617,6 +626,67 @@ export class Game {
     // remains a no-op at early returns so future input fields aren't reset.
   }
 
+  private updateServerAuthoritativeOnline(dt: number): void {
+    const session = this.net;
+    if (!session) return;
+
+    if (this.pendingState) {
+      this.applySnapshot(this.pendingState);
+      this.pendingState = null;
+    }
+
+    // State lives in Supabase, so a reconnecting or inactive player always
+    // catches up without relying on the other browser to broadcast frames.
+    this.serverStatePollAcc += dt;
+    if (this.serverStatePollAcc >= 0.4 && !this.serverStateRequestPending) {
+      this.serverStatePollAcc = 0;
+      this.serverStateRequestPending = true;
+      void session.fetchAuthoritativeState()
+        .then((state) => {
+          if (state) this.pendingState = state;
+        })
+        .catch(() => {
+          // The next poll will retry; gameplay continues with the last state.
+        })
+        .finally(() => {
+          this.serverStateRequestPending = false;
+        });
+    }
+
+    if (!this.isMyOnlineTurn()) return;
+
+    const snapshot = this.input.snapshot();
+    const events: InputEvent[] = [];
+    if (snapshot.jumpPressed) events.push({ type: 'jump' });
+    if (snapshot.firePressed) events.push({ type: 'fire-press' });
+    if (snapshot.fireReleased) events.push({ type: 'fire-release' });
+    if (snapshot.weaponSelect !== null) {
+      events.push({ type: 'weapon', weapon: snapshot.weaponSelect });
+    }
+
+    this.inputSendAcc += dt;
+    if (events.length === 0 && this.inputSendAcc < 1 / 30) return;
+    this.inputSendAcc = 0;
+
+    void session.sendAuthoritativeInput({
+      seq: ++this.guestInputSeq,
+      left: snapshot.left,
+      right: snapshot.right,
+      jump: snapshot.jump,
+      fire: snapshot.fire,
+      aimUp: snapshot.aimUp,
+      aimDown: snapshot.aimDown,
+      pointerActive: snapshot.pointerActive,
+      pointerX: snapshot.pointerX + this.camera.x,
+      pointerY: snapshot.pointerY + this.camera.y,
+      events,
+    }).then((state) => {
+      if (state) this.pendingState = state;
+    }).catch(() => {
+      // Keep the local input loop alive; the next heartbeat retries.
+    });
+  }
+
   private maybeSendState(dt: number, force = false): void {
     if (!this.net || this.net.role !== 'host') return;
     this.stateSendAcc += dt;
@@ -650,6 +720,8 @@ export class Game {
       charge: this.turns.charge,
       activeTeam: active?.team ?? this.turns.teamIndex,
       activeIndex: active?.index ?? 0,
+      teamACursor: teams[0].turnCursor,
+      teamBCursor: teams[1].turnCursor,
       wormsA: teams[0].worms.map(snapWorm),
       wormsB: teams[1].worms.map(snapWorm),
       projectiles: this.projectiles.map((p) => ({
@@ -724,6 +796,8 @@ export class Game {
     snap.wormsB.forEach((s, i) => applyWorm(this.teams![1].worms[i]!, s));
     this.turns.activeWorm =
       this.teams[snap.activeTeam]?.worms[snap.activeIndex] ?? null;
+    this.teams[0].setTurnCursor(snap.teamACursor ?? 0);
+    this.teams[1].setTurnCursor(snap.teamBCursor ?? 0);
 
     this.projectiles = snap.projectiles.map((p) => {
       const proj = new Projectile(p.x, p.y, p.vx, p.vy, p.kind, p.ownerTeam);

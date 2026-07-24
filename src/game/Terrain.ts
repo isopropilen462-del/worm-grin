@@ -1,6 +1,10 @@
 import { COLORS, PHYSICS, WORLD } from './constants';
 import { SeededRng } from './rng';
 
+interface PixelBuffer {
+  data: Uint8ClampedArray;
+}
+
 /**
  * Destructible terrain as an alpha mask in ImageData.
  * Solid = alpha > 128.
@@ -8,27 +12,40 @@ import { SeededRng } from './rng';
 export class Terrain {
   readonly width: number;
   readonly height: number;
-  readonly canvas: OffscreenCanvas | HTMLCanvasElement;
-  private ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
-  private data: ImageData;
+  readonly canvas: OffscreenCanvas | HTMLCanvasElement | null;
+  private ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
+  private data: PixelBuffer;
   private dirty = true;
   private rng: SeededRng;
 
-  constructor(width = WORLD.width, height = WORLD.height, seed?: number) {
+  constructor(
+    width = WORLD.width,
+    height = WORLD.height,
+    seed?: number,
+    headless = false,
+  ) {
     this.width = width;
     this.height = height;
     this.rng = new SeededRng(seed ?? ((Math.random() * 0xffffffff) >>> 0));
-    if (typeof OffscreenCanvas !== 'undefined') {
+    if (headless) {
+      this.canvas = null;
+      this.ctx = null;
+      this.data = { data: new Uint8ClampedArray(width * height * 4) };
+    } else if (typeof OffscreenCanvas !== 'undefined') {
       this.canvas = new OffscreenCanvas(width, height);
+      const ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('2d context required for terrain');
+      this.ctx = ctx as OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
+      this.data = this.ctx.createImageData(width, height);
     } else {
       this.canvas = document.createElement('canvas');
       this.canvas.width = width;
       this.canvas.height = height;
+      const ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('2d context required for terrain');
+      this.ctx = ctx as CanvasRenderingContext2D;
+      this.data = this.ctx.createImageData(width, height);
     }
-    const ctx = this.canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) throw new Error('2d context required for terrain');
-    this.ctx = ctx as CanvasRenderingContext2D;
-    this.data = this.ctx.createImageData(width, height);
     this.generate();
   }
 
@@ -111,7 +128,7 @@ export class Terrain {
       }
     }
 
-    this.ctx.putImageData(this.data, 0, 0);
+    this.ctx?.putImageData(this.data as ImageData, 0, 0);
     this.dirty = false;
   }
 
@@ -166,12 +183,13 @@ export class Terrain {
   }
 
   flush(): void {
-    if (!this.dirty) return;
-    this.ctx.putImageData(this.data, 0, 0);
+    if (!this.dirty || !this.ctx) return;
+    this.ctx.putImageData(this.data as ImageData, 0, 0);
     this.dirty = false;
   }
 
   draw(ctx: CanvasRenderingContext2D, camX: number, camY: number): void {
+    if (!this.canvas) return;
     this.flush();
     ctx.drawImage(
       this.canvas as CanvasImageSource,
