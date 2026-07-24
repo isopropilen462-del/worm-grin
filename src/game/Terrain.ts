@@ -1,4 +1,4 @@
-import { COLORS, WORLD } from './constants';
+import { COLORS, PHYSICS, WORLD } from './constants';
 import { SeededRng } from './rng';
 
 /**
@@ -191,28 +191,63 @@ export class Terrain {
     const points: Array<{ x: number; y: number }> = [];
     const xMin = side === 'left' ? 80 : this.width * 0.62;
     const xMax = side === 'left' ? this.width * 0.38 : this.width - 80;
+
+    const surfaceY = (x: number): number | null => {
+      for (let y = 40; y < WORLD.waterLevel; y++) {
+        if (this.isSolid(x, y) && !this.isSolid(x, y - 1)) return y;
+      }
+      return null;
+    };
+
+    const isSafeSpawn = (x: number, y: number): boolean => {
+      const halfWidth = PHYSICS.wormWidth / 2;
+      const samples = [x - halfWidth + 4, x, x + halfWidth - 4];
+      const surfaces = samples.map(surfaceY);
+      if (surfaces.some((surface) => surface === null)) return false;
+
+      const surfaceRange =
+        Math.max(...(surfaces as number[])) - Math.min(...(surfaces as number[]));
+      if (surfaceRange > 10) return false;
+
+      const wormX = x - halfWidth;
+      const wormY = y - PHYSICS.wormHeight;
+      // Leave a small gap above the feet: ground is allowed below the body,
+      // but no terrain may overlap its sides or head.
+      return !this.rectSolid(
+        wormX + 2,
+        wormY + 2,
+        PHYSICS.wormWidth - 4,
+        PHYSICS.wormHeight - 7,
+      );
+    };
+
+    const addIfSafe = (x: number): boolean => {
+      const y = surfaceY(x);
+      if (y === null || !isSafeSpawn(x, y)) return false;
+      if (points.some((p) => Math.hypot(p.x - x, p.y - y) < 80)) return false;
+      points.push({ x, y });
+      return true;
+    };
+
     let attempts = 0;
     while (points.length < count && attempts < 400) {
       attempts++;
       const x = xMin + this.rng.next() * (xMax - xMin);
-      // Scan from sky down for first solid
-      let found: number | null = null;
-      for (let y = 40; y < WORLD.waterLevel; y++) {
-        if (this.isSolid(x, y)) {
-          found = y;
-          break;
-        }
-      }
-      if (found === null) continue;
-      const tooClose = points.some((p) => Math.hypot(p.x - x, p.y - found!) < 70);
-      if (tooClose) continue;
-      points.push({ x, y: found });
+      addIfSafe(x);
     }
-    // Fallback even spacing
+
+    // Deterministic full scan gives every worm a clear, walkable fallback
+    // rather than spawning it inside a random hill.
+    for (let x = xMin; points.length < count && x <= xMax; x += 8) {
+      addIfSafe(x);
+    }
+
+    // Terrain generation always has ground in the side ranges. This only
+    // protects against a pathological custom map.
     while (points.length < count) {
-      const t = (points.length + 1) / (count + 1);
-      const x = xMin + (xMax - xMin) * t;
-      points.push({ x, y: WORLD.waterLevel - 200 });
+      const x = xMin + ((points.length + 1) / (count + 1)) * (xMax - xMin);
+      const y = surfaceY(x) ?? WORLD.waterLevel - 80;
+      points.push({ x, y });
     }
     return points;
   }

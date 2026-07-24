@@ -47,7 +47,7 @@ import { asSeed, finishRoom } from '../net/rooms';
 import type {
   CarveSnapshot,
   GameSnapshot,
-  InputSnapshot,
+  InputEvent,
   WormSnapshot,
 } from '../net/types';
 
@@ -90,6 +90,9 @@ export class Game {
   private stateSendAcc = 0;
   private unsubNet: Array<() => void> = [];
   private inputSendAcc = 0;
+  private guestInputSeq = 0;
+  private lastRemoteInputSeq = 0;
+  private remoteEvents: InputEvent[] = [];
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -282,6 +285,9 @@ export class Game {
     this.stateSeq = 0;
     this.stateSendAcc = 0;
     this.remoteInput = emptyInput();
+    this.guestInputSeq = 0;
+    this.lastRemoteInputSeq = 0;
+    this.remoteEvents = [];
     this.pendingState = null;
     this.turns.startMatch(this.teams, this.wind);
     this.ai.reset();
@@ -294,7 +300,21 @@ export class Game {
 
     this.unsubNet.push(
       session.onInput((snap) => {
-        this.remoteInput = { ...snap };
+        if (snap.seq <= this.lastRemoteInputSeq) return;
+        this.lastRemoteInputSeq = snap.seq;
+        this.remoteInput = {
+          ...this.remoteInput,
+          left: snap.left,
+          right: snap.right,
+          jump: snap.jump,
+          fire: snap.fire,
+          aimUp: snap.aimUp,
+          aimDown: snap.aimDown,
+          pointerActive: snap.pointerActive,
+          pointerX: snap.pointerX,
+          pointerY: snap.pointerY,
+        };
+        this.remoteEvents.push(...snap.events);
       }),
     );
     this.unsubNet.push(
@@ -379,15 +399,35 @@ export class Game {
     this.time += dt;
     this.input.beginFrame();
 
-    // Guest: send inputs + apply host snapshots (no local sim). Send every
-    // frame interval, not only after its local snapshot says it is their turn:
-    // otherwise a delayed state packet prevents the host from ever receiving
-    // the first action of a new turn.
+    // Guest: send snapshots for held controls and immediate, ordered events
+    // for presses/releases. A fast mouse/key press must not be lost between
+    // 30 Hz heartbeat packets.
     if (this.net?.role === 'guest') {
+      const snapshot = this.input.snapshot();
+      const events: InputEvent[] = [];
+      if (snapshot.jumpPressed) events.push({ type: 'jump' });
+      if (snapshot.firePressed) events.push({ type: 'fire-press' });
+      if (snapshot.fireReleased) events.push({ type: 'fire-release' });
+      if (snapshot.weaponSelect !== null) {
+        events.push({ type: 'weapon', weapon: snapshot.weaponSelect });
+      }
+
       this.inputSendAcc += dt;
-      if (this.inputSendAcc >= 1 / 30) {
+      if (events.length > 0 || this.inputSendAcc >= 1 / 30) {
         this.inputSendAcc = 0;
-        void this.net.sendInput(this.input.snapshot() as InputSnapshot);
+        void this.net.sendInput({
+          seq: ++this.guestInputSeq,
+          left: snapshot.left,
+          right: snapshot.right,
+          jump: snapshot.jump,
+          fire: snapshot.fire,
+          aimUp: snapshot.aimUp,
+          aimDown: snapshot.aimDown,
+          pointerActive: snapshot.pointerActive,
+          pointerX: snapshot.pointerX,
+          pointerY: snapshot.pointerY,
+          events,
+        });
       }
       if (this.pendingState) {
         this.applySnapshot(this.pendingState);
@@ -396,11 +436,11 @@ export class Game {
       return;
     }
 
-    // Consume one-shot remote flags after a frame
     const ctrl = this.controlInput();
-    if (this.net?.role === 'host' && this.turns.teamIndex === 1) {
-      // Host applies guest edge flags once
-    }
+    const remoteEvents =
+      this.net?.role === 'host' && this.turns.teamIndex === 1
+        ? this.takeRemoteEvents()
+        : [];
 
     const active = this.turns.activeWorm;
     const worms = this.allWorms();
@@ -411,7 +451,8 @@ export class Game {
       (this.turns.phase === 'control' || this.turns.phase === 'charging');
 
     if (localControl) {
-      active.handleJumpInput(ctrl.jumpPressed || ctrl.jump, dt);
+      const remoteJump = remoteEvents.some((event) => event.type === 'jump');
+      active.handleJumpInput(ctrl.jumpPressed || remoteJump || ctrl.jump, dt);
       if (this.turns.phase === 'control') {
         if (ctrl.left) active.tryMove(-1);
         if (ctrl.right) active.tryMove(1);
@@ -506,7 +547,13 @@ export class Game {
       return;
     }
 
-    const weaponPick = this.weaponFromIndex(ctrl.weaponSelect ?? 0);
+    const remoteWeapon = remoteEvents.find(
+      (event): event is Extract<InputEvent, { type: 'weapon' }> =>
+        event.type === 'weapon',
+    );
+    const weaponPick = this.weaponFromIndex(
+      remoteWeapon?.weapon ?? ctrl.weaponSelect ?? 0,
+    );
     if (weaponPick) {
       this.turns.weapon = weaponPick;
       this.syncWeaponButtons();
@@ -529,7 +576,10 @@ export class Game {
     const fireOpts = this.buildFireOptions(active, ctrl);
 
     if (this.turns.phase === 'control') {
-      if (ctrl.firePressed) {
+      const remoteFirePressed = remoteEvents.some(
+        (event) => event.type === 'fire-press',
+      );
+      if (ctrl.firePressed || remoteFirePressed) {
         if (instantWeapons.includes(this.turns.weapon)) {
           this.applyFire(fireWeapon(this.turns.weapon, active, 1, this.terrain, fireOpts));
         } else {
@@ -540,7 +590,10 @@ export class Game {
       }
     } else if (this.turns.phase === 'charging') {
       this.turns.charge = Math.min(1, this.turns.charge + dt / WEAPON.chargeTime);
-      if (ctrl.fireReleased || this.turns.charge >= 1) {
+      const remoteFireReleased = remoteEvents.some(
+        (event) => event.type === 'fire-release',
+      );
+      if (ctrl.fireReleased || remoteFireReleased || this.turns.charge >= 1) {
         this.applyFire(
           fireWeapon(this.turns.weapon, active, this.turns.charge, this.terrain, fireOpts),
         );
@@ -551,15 +604,15 @@ export class Game {
     this.clearRemoteEdges();
   }
 
+  private takeRemoteEvents(): InputEvent[] {
+    const events = this.remoteEvents;
+    this.remoteEvents = [];
+    return events;
+  }
+
   private clearRemoteEdges(): void {
-    if (!this.net || this.turns.teamIndex !== 1) return;
-    this.remoteInput = {
-      ...this.remoteInput,
-      jumpPressed: false,
-      firePressed: false,
-      fireReleased: false,
-      weaponSelect: null,
-    };
+    // Discrete remote commands are drained by takeRemoteEvents(). This method
+    // remains a no-op at early returns so future input fields aren't reset.
   }
 
   private maybeSendState(dt: number, force = false): void {
